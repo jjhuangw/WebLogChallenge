@@ -67,7 +67,7 @@ public class SessionizeExecutor implements Serializable {
 	}
 	
 	/**
-	 * Parse line to structure
+	 * Parse line and transform to structure
 	 *
 	 * @param line
 	 * @return Row structure
@@ -96,7 +96,7 @@ public class SessionizeExecutor implements Serializable {
 	 * @param main data set
 	 * @return sessionized data set
 	 */
-	private Dataset<Row> AggregateSessionizeData(Dataset<Row> mainDataset) {
+	private Dataset<Row> aggregateSessionizeData(Dataset<Row> mainDataset) {
 		Dataset<Row> sessionDataset = mainDataset
 				.select(functions.window(mainDataset.col(COLUMN_TIME_STAMP), SESSION_WINDOW_SIZE).as(COLUMN_FIXED_SESSION_WINDOW), 
 						mainDataset.col(COLUMN_TIME_STAMP), mainDataset.col(COLUMN_CLIENT_IP))
@@ -131,8 +131,6 @@ public class SessionizeExecutor implements Serializable {
 				functions.unix_timestamp(sessionizeWithDurationDataset.col(COLUMN_TIME_STAMP))
 						.minus(functions.unix_timestamp(sessionizeWithDurationDataset.col("firstHitTimeStamp"))));
 		
-//		sessionizeWithDurationDataset.show(10, false);
-		
 		// find the session duration
 		Dataset<Row> sessionDurationDf = sessionizeWithDurationDataset.groupBy("sessionId")
 				.agg(functions.max("timeDiffBetweenFirstHit").alias(COLUMN_SESSION_DURATION));
@@ -155,7 +153,7 @@ public class SessionizeExecutor implements Serializable {
     }
 	
 	public void execute(String filePath) {
-		//TODO: run in local mode for development, before release need to change to cluster mode
+		//TODO: local mode only for development, before release remember change to cluster mode
 		SparkSession sparkSession = SparkSession.builder().appName("SessionizeExecutor").master("local[*]")
 				.config("spark.driver.host", "127.0.0.1").config("spark.driver.bindAddress", "127.0.0.1").getOrCreate();
 		
@@ -168,13 +166,13 @@ public class SessionizeExecutor implements Serializable {
 		mainDataset.cache();
 		
 		// Sessionize web log by IP. Aggregate all page hits by visitor/IP during a session.
-		Dataset<Row> sessionizeDataset = AggregateSessionizeData(mainDataset);
+		Dataset<Row> sessionizeDataset = aggregateSessionizeData(mainDataset);
 
 		// Calculate session duration
 		Dataset<Row> sessionizeWithDurationDataset = calculateSessionDuration(mainDataset, sessionizeDataset);
 		sessionizeWithDurationDataset.cache();
 	
-		// TODO: Calculate result and output result. In here, csv and repartition is for local debugging,
+		// TODO: Calculate and output result. Here, csv and repartition is for debugging purpose,
 		// Determine the average session time
         Dataset<Row> averageSessionDurationsDataset = calculateAverageSessionDuration(sessionizeWithDurationDataset);
         averageSessionDurationsDataset.repartition(1).write().option("sep", ";").option("header", "true").mode("overwrite").csv("./result/averageSessionDuration");
