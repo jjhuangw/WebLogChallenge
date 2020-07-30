@@ -21,7 +21,6 @@ import org.apache.spark.sql.types.StructType;
 import scala.collection.JavaConverters;
 import scala.collection.immutable.Seq;
 
-
 /**
  * Web Log SessionizeExecutor
  *
@@ -31,19 +30,19 @@ import scala.collection.immutable.Seq;
 public class SessionizeExecutor implements Serializable {
 
 	private static final long serialVersionUID = 1L;
-	
+
 	private static final Pattern LOG_PATTERN = Pattern.compile(
 			"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z) (\\S+) (\\S+) (\\S+) (\\S+) (\\S+) (\\S+) (\\S+) (\\S+) (\\S+) (\\S+) \"(\\S+ \\S+ \\S+)\" \"([^\"]*)\" (\\S+) (\\S+)");
-	
+
 	private static final String SESSION_WINDOW_SIZE = "15 minutes";
-	
+
 	private static final String COLUMN_CLIENT_IP = "clientIp";
 	private static final String COLUMN_FIXED_SESSION_WINDOW = "fixedSessionWindow";
 	private static final String COLUMN_SESSION_DURATION = "sessionDuration";
 	private static final String COLUMN_TIME_STAMP = "timeStamp";
-	
-	//	Log format please refer to 
-	//	https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/access-log-collection.html#access-log-entry-format
+
+	// Log format please refer to
+	// https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/access-log-collection.html#access-log-entry-format
 	private StructType createAndGetSchema() {
 		List<StructField> structFields = new ArrayList<>();
 		structFields.add(DataTypes.createStructField(COLUMN_TIME_STAMP, DataTypes.StringType, false));
@@ -65,7 +64,7 @@ public class SessionizeExecutor implements Serializable {
 		structFields.add(DataTypes.createStructField("sslProtocol", DataTypes.StringType, true));
 		return DataTypes.createStructType(structFields);
 	}
-	
+
 	/**
 	 * Parse line and transform to structure
 	 *
@@ -75,7 +74,7 @@ public class SessionizeExecutor implements Serializable {
 	private Row parseLine(String line) {
 		Matcher matcher = LOG_PATTERN.matcher(line);
 		matcher.find();
-		
+
 		String[] clientIpPort = { "-", "-" };
 		String[] backendIpPort = { "-", "-" };
 		if (!matcher.group(3).equalsIgnoreCase("-")) {
@@ -89,7 +88,7 @@ public class SessionizeExecutor implements Serializable {
 				matcher.group(9), matcher.group(10), matcher.group(11), matcher.group(12), matcher.group(13),
 				matcher.group(14), matcher.group(15));
 	}
-	
+
 	/**
 	 * Aggregate all page hits by visitor/IP during a session.
 	 *
@@ -98,13 +97,14 @@ public class SessionizeExecutor implements Serializable {
 	 */
 	private Dataset<Row> aggregateSessionizeData(Dataset<Row> mainDataset) {
 		Dataset<Row> sessionDataset = mainDataset
-				.select(functions.window(mainDataset.col(COLUMN_TIME_STAMP), SESSION_WINDOW_SIZE).as(COLUMN_FIXED_SESSION_WINDOW), 
-						mainDataset.col(COLUMN_TIME_STAMP), mainDataset.col(COLUMN_CLIENT_IP))
+				.select(functions.window(mainDataset.col(COLUMN_TIME_STAMP), SESSION_WINDOW_SIZE)
+						.as(COLUMN_FIXED_SESSION_WINDOW), mainDataset.col(COLUMN_TIME_STAMP),
+						mainDataset.col(COLUMN_CLIENT_IP))
 				.groupBy(COLUMN_FIXED_SESSION_WINDOW, COLUMN_CLIENT_IP).count()
 				.withColumnRenamed("count", "numberHitsInSessionForIp");
 		return sessionDataset.withColumn("sessionId", functions.monotonically_increasing_id());
 	}
-	
+
 	/**
 	 * Find the session duration (between the first hit and last hit)
 	 *
@@ -114,27 +114,28 @@ public class SessionizeExecutor implements Serializable {
 	 */
 	private Dataset<Row> calculateSessionDuration(Dataset<Row> mainDataset, Dataset<Row> sessionizeDataset) {
 		Dataset<Row> datasetWithTimeStamp = mainDataset.select(
-				functions.window(mainDataset.col(COLUMN_TIME_STAMP), SESSION_WINDOW_SIZE).alias(COLUMN_FIXED_SESSION_WINDOW),
+				functions.window(mainDataset.col(COLUMN_TIME_STAMP), SESSION_WINDOW_SIZE)
+						.alias(COLUMN_FIXED_SESSION_WINDOW),
 				mainDataset.col(COLUMN_TIME_STAMP), mainDataset.col(COLUMN_CLIENT_IP), mainDataset.col("request"));
-		
-		Seq<String> joinColumns = JavaConverters.asScalaBuffer(Arrays.asList(COLUMN_FIXED_SESSION_WINDOW, COLUMN_CLIENT_IP)).toList();
-		
-		Dataset<Row> sessionizeWithDurationDataset = datasetWithTimeStamp.join(sessionizeDataset,
-				joinColumns);
-		
+
+		Seq<String> joinColumns = JavaConverters
+				.asScalaBuffer(Arrays.asList(COLUMN_FIXED_SESSION_WINDOW, COLUMN_CLIENT_IP)).toList();
+
+		Dataset<Row> sessionizeWithDurationDataset = datasetWithTimeStamp.join(sessionizeDataset, joinColumns);
+
 		Dataset<Row> firstHitTimeStamps = sessionizeWithDurationDataset.groupBy("sessionId")
 				.agg(functions.min(COLUMN_TIME_STAMP).alias("firstHitTimeStamp"));
-		
+
 		sessionizeWithDurationDataset = firstHitTimeStamps.join(sessionizeWithDurationDataset, "sessionId");
-		
+
 		sessionizeWithDurationDataset = sessionizeWithDurationDataset.withColumn("timeDiffBetweenFirstHit",
 				functions.unix_timestamp(sessionizeWithDurationDataset.col(COLUMN_TIME_STAMP))
 						.minus(functions.unix_timestamp(sessionizeWithDurationDataset.col("firstHitTimeStamp"))));
-		
+
 		// find the session duration
 		Dataset<Row> sessionDurationDf = sessionizeWithDurationDataset.groupBy("sessionId")
 				.agg(functions.max("timeDiffBetweenFirstHit").alias(COLUMN_SESSION_DURATION));
-		
+
 		return sessionizeWithDurationDataset.join(sessionDurationDf, "sessionId");
 	}
 
@@ -142,48 +143,55 @@ public class SessionizeExecutor implements Serializable {
 		return sessionizeWithDurationDataset
 				.select(functions.avg(COLUMN_SESSION_DURATION).alias("averageSessionDuration"));
 	}
-	
+
 	private Dataset<Row> findUniqueURLPerSession(Dataset<Row> sessionizeDataset) {
-		return sessionizeDataset.groupBy("sessionId", "request").count().distinct().withColumnRenamed("count", "uniqueUrlCount");
+		return sessionizeDataset.groupBy("sessionId", "request").count().distinct().withColumnRenamed("count",
+				"uniqueUrlCount");
 	}
-	
+
 	private Dataset<Row> findMostEngagedUsers(Dataset<Row> sessionizeWithDurationDataset) {
 		return sessionizeWithDurationDataset.select(COLUMN_CLIENT_IP, "sessionId", COLUMN_SESSION_DURATION)
 				.sort(sessionizeWithDurationDataset.col(COLUMN_SESSION_DURATION).desc()).distinct();
-    }
-	
+	}
+
 	public void execute(String filePath) {
-		//TODO: local mode only for development, before release remember change to cluster mode
+		// TODO: local mode only for development, before release remember change to cluster mode
 		SparkSession sparkSession = SparkSession.builder().appName("SessionizeExecutor").master("local[*]")
 				.config("spark.driver.host", "127.0.0.1").config("spark.driver.bindAddress", "127.0.0.1").getOrCreate();
-		
+
 		// data manipulation and data clean
-		Dataset<Row> parsedDataset = sparkSession.read().textFile(filePath).filter((FilterFunction<String>) r -> LOG_PATTERN.matcher((String) r).find())
+		Dataset<Row> parsedDataset = sparkSession.read().textFile(filePath)
+				.filter((FilterFunction<String>) r -> LOG_PATTERN.matcher((String) r).find())
 				.map((MapFunction<String, Row>) line -> parseLine(line), RowEncoder.apply(createAndGetSchema()));
 		Dataset<Row> mainDataset = parsedDataset.filter(
-				"backendIp != '-' AND requestProcessingTimeInSecond !='-1' AND backendProcessingTimeInSecond !='-1' AND responseProcessingTime !='-1' ").withColumn(COLUMN_TIME_STAMP,
-				parsedDataset.col(COLUMN_TIME_STAMP).cast(DataTypes.TimestampType));
+				"backendIp != '-' AND requestProcessingTimeInSecond !='-1' AND backendProcessingTimeInSecond !='-1' AND responseProcessingTime !='-1' ")
+				.withColumn(COLUMN_TIME_STAMP, parsedDataset.col(COLUMN_TIME_STAMP).cast(DataTypes.TimestampType));
 		mainDataset.cache();
-		
-		// Sessionize web log by IP. Aggregate all page hits by visitor/IP during a session.
+
+		// Sessionize web log by IP. Aggregate all page hits by visitor/IP during a
+		// session.
 		Dataset<Row> sessionizeDataset = aggregateSessionizeData(mainDataset);
 
 		// Calculate session duration
 		Dataset<Row> sessionizeWithDurationDataset = calculateSessionDuration(mainDataset, sessionizeDataset);
 		sessionizeWithDurationDataset.cache();
-	
-		// TODO: Calculate and output result. Here, csv and repartition is for debugging purpose,
-		// Determine the average session time
-        Dataset<Row> averageSessionDurationsDataset = calculateAverageSessionDuration(sessionizeWithDurationDataset);
-        averageSessionDurationsDataset.repartition(1).write().option("sep", ";").option("header", "true").mode("overwrite").csv("./result/averageSessionDuration");
-        
-        // Determine unique URL visits per session. To clarify, count a hit to a unique URL only once per session.
-        Dataset<Row> uniqueVisitDataset = findUniqueURLPerSession(sessionizeWithDurationDataset);
-        uniqueVisitDataset.repartition(1).write().option("sep", ";").option("header", "true").mode("overwrite").csv("./result/uniqueVisit");
 
-        // Find the most engaged users, ie the IPs with the longest session times
-        Dataset<Row> mostEngagedDataSet = findMostEngagedUsers(sessionizeWithDurationDataset);
-        mostEngagedDataSet.repartition(1).write().option("sep", ";").option("header", "true").mode("overwrite").csv("./result/mostEngaged");
+		// TODO: Calculate and output result. Here, csv and repartition is for debugging purpose.
+		// Determine the average session time
+		Dataset<Row> averageSessionDurationsDataset = calculateAverageSessionDuration(sessionizeWithDurationDataset);
+		averageSessionDurationsDataset.repartition(1).write().option("sep", ";").option("header", "true")
+				.mode("overwrite").csv("./result/averageSessionDuration");
+
+		// Determine unique URL visits per session. To clarify, count a hit to a unique
+		// URL only once per session.
+		Dataset<Row> uniqueVisitDataset = findUniqueURLPerSession(sessionizeWithDurationDataset);
+		uniqueVisitDataset.repartition(1).write().option("sep", ";").option("header", "true").mode("overwrite")
+				.csv("./result/uniqueVisit");
+
+		// Find the most engaged users, ie the IPs with the longest session times
+		Dataset<Row> mostEngagedDataSet = findMostEngagedUsers(sessionizeWithDurationDataset);
+		mostEngagedDataSet.repartition(1).write().option("sep", ";").option("header", "true").mode("overwrite")
+				.csv("./result/mostEngaged");
 
 	}
 
