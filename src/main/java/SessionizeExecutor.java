@@ -1,5 +1,6 @@
 import java.io.File;
 import java.io.Serializable;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -18,6 +19,8 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
+import net.lingala.zip4j.ZipFile;
+import net.lingala.zip4j.exception.ZipException;
 import scala.collection.JavaConverters;
 import scala.collection.immutable.Seq;
 
@@ -43,7 +46,7 @@ public class SessionizeExecutor implements Serializable {
 
 	// Log format please refer to
 	// https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/access-log-collection.html#access-log-entry-format
-	private StructType createAndGetSchema() {
+	public StructType createAndGetSchema() {
 		List<StructField> structFields = new ArrayList<>();
 		structFields.add(DataTypes.createStructField(COLUMN_TIME_STAMP, DataTypes.StringType, false));
 		structFields.add(DataTypes.createStructField("elb", DataTypes.StringType, true));
@@ -71,7 +74,7 @@ public class SessionizeExecutor implements Serializable {
 	 * @param line
 	 * @return Row structure
 	 */
-	private Row parseLine(String line) {
+	public Row parseLine(String line) {
 		Matcher matcher = LOG_PATTERN.matcher(line);
 		matcher.find();
 
@@ -95,7 +98,7 @@ public class SessionizeExecutor implements Serializable {
 	 * @param main data set
 	 * @return sessionized data set
 	 */
-	private Dataset<Row> aggregateSessionizeData(Dataset<Row> mainDataset) {
+	public Dataset<Row> aggregateSessionizeData(Dataset<Row> mainDataset) {
 		Dataset<Row> sessionDataset = mainDataset
 				.select(functions.window(mainDataset.col(COLUMN_TIME_STAMP), SESSION_WINDOW_SIZE)
 						.as(COLUMN_FIXED_SESSION_WINDOW), mainDataset.col(COLUMN_TIME_STAMP),
@@ -112,7 +115,7 @@ public class SessionizeExecutor implements Serializable {
 	 * @param sessionizedDataset
 	 * @return sessionizedDataset with session duration
 	 */
-	private Dataset<Row> calculateSessionDuration(Dataset<Row> mainDataset, Dataset<Row> sessionizeDataset) {
+	public Dataset<Row> calculateSessionDuration(Dataset<Row> mainDataset, Dataset<Row> sessionizeDataset) {
 		Dataset<Row> datasetWithTimeStamp = mainDataset.select(
 				functions.window(mainDataset.col(COLUMN_TIME_STAMP), SESSION_WINDOW_SIZE)
 						.alias(COLUMN_FIXED_SESSION_WINDOW),
@@ -139,17 +142,17 @@ public class SessionizeExecutor implements Serializable {
 		return sessionizeWithDurationDataset.join(sessionDurationDf, "sessionId");
 	}
 
-	private Dataset<Row> calculateAverageSessionDuration(Dataset<Row> sessionizeWithDurationDataset) {
+	public Dataset<Row> calculateAverageSessionDuration(Dataset<Row> sessionizeWithDurationDataset) {
 		return sessionizeWithDurationDataset
 				.select(functions.avg(COLUMN_SESSION_DURATION).alias("averageSessionDuration"));
 	}
 
-	private Dataset<Row> findUniqueURLPerSession(Dataset<Row> sessionizeDataset) {
+	public Dataset<Row> findUniqueURLPerSession(Dataset<Row> sessionizeDataset) {
 		return sessionizeDataset.groupBy("sessionId", "request").count().distinct().withColumnRenamed("count",
 				"uniqueUrlCount");
 	}
 
-	private Dataset<Row> findMostEngagedUsers(Dataset<Row> sessionizeWithDurationDataset) {
+	public Dataset<Row> findMostEngagedUsers(Dataset<Row> sessionizeWithDurationDataset) {
 		return sessionizeWithDurationDataset.select(COLUMN_CLIENT_IP, "sessionId", COLUMN_SESSION_DURATION)
 				.sort(sessionizeWithDurationDataset.col(COLUMN_SESSION_DURATION).desc()).distinct();
 	}
@@ -195,12 +198,34 @@ public class SessionizeExecutor implements Serializable {
 
 	}
 
+	private static void extractZipFile(String zipFileName) {
+		try {
+			File zipFile = new File(SessionizeExecutor.class.getClassLoader()
+					.getResource(zipFileName).getFile());
+			
+			if (zipFile.exists()) {
+				new ZipFile(zipFile).extractAll(zipFile.getParent());
+			} else {
+				System.out.println("Can't find the test data in classpath!");
+				System.exit(1);
+			}
+		} catch (ZipException e) {
+			System.out.println("File extracts fail!");
+			e.printStackTrace();
+			System.exit(1);
+		}
+	}
+	
 	public static void main(String[] args) {
-		File file = new File(SessionizeExecutor.class.getClassLoader()
-				.getResource("2015_07_22_mktplace_shop_web_log_sample.log").getFile());
-
+		String logFileName = "2015_07_22_mktplace_shop_web_log_sample.log";
+		URL logFileUrl = SessionizeExecutor.class.getClassLoader().getResource(logFileName);
+		
+		if(logFileUrl==null) {
+			extractZipFile(logFileName + ".zip");
+		}
 		SessionizeExecutor executor = new SessionizeExecutor();
-		executor.execute(file.getAbsolutePath());
+		executor.execute(new File(SessionizeExecutor.class.getClassLoader()
+				.getResource(logFileName).getFile()).getAbsolutePath());
 	}
 
 }
